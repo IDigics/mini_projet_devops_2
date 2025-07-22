@@ -1,0 +1,31 @@
+name: CI/CD Pipeline
+on: push
+jobs:
+  build-and-deploy:
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+      
+      # Build and push your app image
+      - name: Build Node App
+        run: |
+          TIMESTAMP=$(date +"%Y%m%d-%H%M%S")
+          docker build -t 192.168.10.20:5000/node-app:$TIMESTAMP .
+          docker push 192.168.10.20:5000/node-app:$TIMESTAMP
+          echo "IMAGE_TAG=$TIMESTAMP" >> $GITHUB_ENV
+      
+      # Pull, tag, and push MongoDB images to private registry
+      - name: Cache MongoDB Images
+        run: |
+          docker pull mongo
+          docker pull mongo-express
+          docker tag mongo 192.168.10.20:5000/mongo
+          docker tag mongo-express 192.168.10.20:5000/mongo-express
+          docker push 192.168.10.20:5000/mongo
+          docker push 192.168.10.20:5000/mongo-express
+      
+      # Deploy with Ansible
+      - name: Deploy Stack
+        run: |
+          ansible-playbook ~/ansible/playbook.yml -i ~/ansible/inventory.ini \
+            --extra-vars "image_tag=$IMAGE_TAG" --ask-become-pass

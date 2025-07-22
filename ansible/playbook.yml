@@ -1,0 +1,109 @@
+---
+- hosts: servers
+  become: yes
+  vars:
+    image_tag: "{{ image_tag | default('missing') }}"
+    ansible_user: "salim"
+  tasks:
+    # Stop and remove any existing containers
+    - name: Clean up old containers
+      command: docker-compose -f /opt/node-app/docker-compose.yml down -v
+      args:
+        chdir: /opt/node-app
+      ignore_errors: yes
+
+    # Install Docker first
+    - name: Install Docker and dependencies
+      apt:
+        name:
+          - docker.io
+          - docker-compose
+          - jq
+          - nginx
+        state: present
+        update_cache: yes
+    
+    # Add user to docker group
+    - name: Add user to docker group
+      user:
+        name: "{{ ansible_user }}"
+        groups: docker
+        append: yes
+    
+    # Create app directory
+    - name: Create app directory
+      file:
+        path: /opt/node-app
+        state: directory
+        mode: '0755'
+    
+    # Copy docker-compose file
+    - name: Copy docker-compose.yml
+      copy:
+        src: "{{ playbook_dir }}/files/docker-compose.yml"
+        dest: /opt/node-app/docker-compose.yml
+        mode: '0644'
+    
+    # Update image tag in compose file
+    - name: Update image version
+      replace:
+        path: /opt/node-app/docker-compose.yml
+        regexp: '\${TAG}'
+        replace: "{{ image_tag }}"
+    
+    # Deploy Nginx config
+    - name: Configure Nginx
+      copy:
+        dest: /etc/nginx/sites-available/app.local
+        content: |
+          server {
+              listen 80;
+              server_name app.local;
+
+              location / {
+                  proxy_pass http://localhost:3000;
+                  proxy_http_version 1.1;
+                  proxy_set_header Upgrade $http_upgrade;
+                  proxy_set_header Connection 'upgrade';
+                  proxy_set_header Host $host;
+                  proxy_cache_bypass $http_upgrade;
+              }
+
+              location ~ ^/mongo(/|$) {
+                  proxy_pass http://localhost:8081;
+                  proxy_set_header Host $host;
+                  rewrite ^/mongo$ /mongo/ permanent;
+                  rewrite ^/mongo/(.*)$ /$1 break;
+                  sub_filter '="/' '="/mongo/';
+                  sub_filter_once off;
+              }
+          }
+      notify: 
+        - Restart Nginx
+        - Enable Nginx site
+
+    # Remove default Nginx config
+    - name: Remove default site
+      file:
+        path: /etc/nginx/sites-enabled/default
+        state: absent
+      notify: Restart Nginx
+    
+    # Deploy stack with force recreate
+    - name: Deploy Docker stack
+      command: docker-compose -f /opt/node-app/docker-compose.yml up -d --force-recreate
+      args:
+        chdir: /opt/node-app
+    
+  handlers:
+    - name: Enable Nginx site
+      file:
+        src: /etc/nginx/sites-available/app.local
+        dest: /etc/nginx/sites-enabled/app.local
+        state: link
+      notify: Restart Nginx
+
+    - name: Restart Nginx
+      service:
+        name: nginx
+        state: restarted
